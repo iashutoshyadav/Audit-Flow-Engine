@@ -282,6 +282,14 @@ def parse_financial_statement_advanced(lines):
         ]
 
         if numbers or is_category_header(line):
+            # Extract preliminary item_name for safety checks
+            # Find where numbers start to get the item name
+            preliminary_item_name = line
+            if numbers:
+                first_num_match = re.search(re.escape(numbers[0]), line)
+                if first_num_match:
+                    preliminary_item_name = line[:first_num_match.start()].strip()
+            
             first_num_pos = len(line)
             if numbers:
                 potential_pos = line.find(numbers[0])
@@ -307,10 +315,11 @@ def parse_financial_statement_advanced(lines):
                     
                     # 2. Heuristic: If first number is small (< 100) and it's NOT a Ratio/EPS row
                     # This handles cases like "2.1" where count check might fail or headers aren't perfect
+                    # USE PRELIMINARY ITEM NAME for safety check
                     if not is_note_index and first_val_float < 100:
                          is_safe_to_drop = True
                          # Safety: Don't drop small numbers for EPS, Ratios, or specific fields
-                         if any(x in item_name.lower() for x in ["earnings", "share", "eps", "ratio", "parity", "yield"]):
+                         if any(x in preliminary_item_name.lower() for x in ["earnings", "share", "eps", "ratio", "parity", "yield"]):
                              is_safe_to_drop = False
                          
                          if is_safe_to_drop and len(numbers) > 1: 
