@@ -138,32 +138,37 @@ def extract_table_structure(pdf_path):
             # For scanned PDFs, take first 6 pages max
             pages_to_process_indices = list(range(min(total_pages, 6)))
         else:
-            with pdfplumber.open(pdf_path) as pdf:
-                # For native PDFs, find relevant pages
+            # Native PDF: Use PyMuPDF for fast text extraction (avoid pdfplumber hangs)
+            try:
+                doc = fitz.open(pdf_path)
                 keywords = ["Balance Sheet", "Profit and Loss", "Cash Flow", "Assets", "Liabilities", "Income"]
-                for i, page in enumerate(pdf.pages):
-                    text = page.extract_text() or ""
+                
+                for i in range(len(doc)):
+                    page = doc[i]
+                    text = page.get_text() or ""
+                    
                     if any(k.lower() in text.lower() for k in keywords):
                         pages_to_process_indices.append(i)
-                    
-                    # Extract text immediately for native PDFs
-                    if i in pages_to_process_indices:
                         all_text_lines.extend(text.split("\n"))
                 
                 # Context: Add next 1 page for each hit to catch overflow tables
                 additional_indices = []
                 for idx in pages_to_process_indices:
-                    if idx + 1 < len(pdf.pages) and (idx + 1) not in pages_to_process_indices:
-                         additional_indices.append(idx + 1)
+                    if idx + 1 < len(doc) and (idx + 1) not in pages_to_process_indices:
+                        additional_indices.append(idx + 1)
                 
                 # Fetch text for context pages
                 for idx in additional_indices:
-                     # Only if we aren't over limit
-                     if len(pages_to_process_indices) + len(additional_indices) <= MAX_PAGES_TO_PROCESS:
-                         try:
-                             text = pdf.pages[idx].extract_text()
-                             if text: all_text_lines.extend(text.split("\n"))
-                         except: pass
+                    # Only if we aren't over limit
+                    if len(pages_to_process_indices) + len(additional_indices) <= MAX_PAGES_TO_PROCESS:
+                         text = doc[idx].get_text()
+                         if text: all_text_lines.extend(text.split("\n"))
+                
+                doc.close()
+            except Exception as e:
+                logger.error(f"PyMuPDF native extraction failed: {e}")
+                # Fallback to empty, will trigger OCR if result is empty
+
 
         # deduplicate and limit indices
         pages_to_process_indices = sorted(list(set(pages_to_process_indices)))[:MAX_PAGES_TO_PROCESS]
