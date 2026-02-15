@@ -22,7 +22,7 @@ if os.path.exists(r'C:\Program Files\Tesseract-OCR\tesseract.exe'):
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "temp", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 MAX_PAGES_TO_PROCESS = 10
-OCR_DPI = 300
+OCR_DPI = 200  # Reduced to save memory on Free Tier
 
 def get_file_hash(pdf_path):
     """Calculates MD5 hash of file for caching."""
@@ -171,8 +171,8 @@ def extract_table_structure(pdf_path):
         # 3. Parallel OCR (Only if needed)
         if is_scanned or not all_text_lines:
             logger.info(f"Running Parallel OCR on {len(pages_to_process_indices)} pages...")
-            # Increased workers for speed
-            with ThreadPoolExecutor(max_workers=4) as executor: 
+            # Reduced workers to prevent OOM on Free Tier
+            with ThreadPoolExecutor(max_workers=2) as executor: 
                 futures = [executor.submit(ocr_page, idx, pdf_path) for idx in pages_to_process_indices]
                 for future in futures:
                     text_content = future.result()
