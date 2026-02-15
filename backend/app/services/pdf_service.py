@@ -17,9 +17,21 @@ def extract_table_structure(pdf_path):
     }
 
     try:
+        # 1. Smart Page Detection
+        relevant_pages = find_relevant_pages(pdf_path)
+        print(f"DEBUG: Relevant pages found: {relevant_pages}")
+
         with pdfplumber.open(pdf_path) as pdf:
             all_text_lines = []
-            for page in pdf.pages:
+            
+            # Process only relevant pages
+            pages_to_process = [pdf.pages[i] for i in relevant_pages] if relevant_pages else pdf.pages
+            
+            if not relevant_pages:
+                 print("DEBUG: No specific financial pages found, scanning first 20 pages...")
+                 pages_to_process = pdf.pages[:20]
+
+            for page in pages_to_process:
                 text = page.extract_text()
                 if text:
                     all_text_lines.extend(text.split("\n"))
@@ -28,9 +40,10 @@ def extract_table_structure(pdf_path):
                 print(f"DEBUG: Attempting advanced parse on {len(all_text_lines)} text lines")
                 result = parse_financial_statement_advanced(all_text_lines)
 
+            # 2. Targeted Table Extraction (if parse failed)
             if not result["rows"]:
-                print("DEBUG: Advanced parse found no rows, attempting table extraction...")
-                for page in pdf.pages:
+                print("DEBUG: Advanced parse found no rows, attempting targeted table extraction...")
+                for page in pages_to_process:
                     tables = page.extract_tables()
                     if not tables:
                         continue
@@ -65,9 +78,11 @@ def extract_table_structure(pdf_path):
                                 "indent": indent_level // 2
                             })
 
+        # 3. Targeted OCR (last resort)
         if not result["rows"]:
-            print("DEBUG: Table extraction found no rows, attempting OCR...")
-            result = extract_table_with_ocr(pdf_path)
+            print("DEBUG: Table extraction found no rows, attempting Targeted OCR...")
+            # Use same relevant pages for OCR
+            result = extract_table_with_ocr(pdf_path, relevant_pages)
 
     except Exception as e:
         print(f"DEBUG: PDF processing error: {str(e)}")
@@ -77,7 +92,47 @@ def extract_table_structure(pdf_path):
     return result
 
 
-def extract_table_with_ocr(pdf_path):
+def find_relevant_pages(pdf_path):
+    """
+    Scans PDF text quickly to find pages containing financial statements.
+    Returns a list of page indices (0-based) to process.
+    """
+    keywords = [
+        "Balance Sheet", "Statement of Assets and Liabilities",
+        "Statement of Profit and Loss", "Income Statement", 
+        "Cash Flow Statement", "Statement of Cash Flows"
+    ]
+    
+    relevant_indices = set()
+    
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            # Limit scan to first 100 pages to save time (Annual reports usually have financials early or middle)
+            # or scan all if fast enough. Text extraction is fast.
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text()
+                if not text:
+                    continue
+                
+                text_lower = text.lower()
+                # Check for keywords
+                if any(k.lower() in text_lower for k in keywords):
+                    # Found a hit! Add this page and next 2 pages context
+                    relevant_indices.add(i)
+                    if i + 1 < len(pdf.pages): relevant_indices.add(i + 1)
+                    if i + 2 < len(pdf.pages): relevant_indices.add(i + 2)
+                    
+            # Identify "consolidated" vs "standalone" if both exist? 
+            # For now, just taking all hits is better than taking all 200 pages.
+            
+    except Exception as e:
+        print(f"DEBUG: Smart page detection failed: {e}")
+        return []
+        
+    return sorted(list(relevant_indices))
+
+
+def extract_table_with_ocr(pdf_path, pages_to_scan=None):
     result = {
         "year_headers": [],
         "rows": []
@@ -86,9 +141,19 @@ def extract_table_with_ocr(pdf_path):
     try:
         doc = fitz.open(pdf_path)
         all_text_lines = []
+        
+        # Determine pages to scan
+        if pages_to_scan:
+            page_iterator = [doc[i] for i in pages_to_scan if i < len(doc)]
+        else:
+            # Fallback: Scan first 20 pages if no guidance
+            page_iterator = list(doc)[:20]
 
-        for page in doc:
-            pix = page.get_pixmap(dpi=300)
+        print(f"DEBUG: Starting OCR on {len(page_iterator)} specific pages...")
+
+        for page in page_iterator:
+            # Reduced DPI from 300 to 200 for speed
+            pix = page.get_pixmap(dpi=200) 
             img_data = pix.tobytes("png")
             image = Image.open(io.BytesIO(img_data))
             custom_config = r"--oem 3 --psm 6"
