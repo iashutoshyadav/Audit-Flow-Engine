@@ -3,7 +3,8 @@ from app.models.financial_schema import FinancialSection
 SECTION_KEYWORDS = {
     FinancialSection.REVENUE: [
         "revenue", "sales", "income from operations", "other income", "revenue from operations",
-        "turnover", "income from sales", "operating income"
+        "revenue", "sales", "income from operations", "other income", "revenue from operations",
+        "turnover", "income from sales", "operating income", "total income", "income"
     ],
     FinancialSection.COST_OF_GOODS: [
         "cost of material", "cost of goods", "purchases", "inventory", "stock in trade",
@@ -13,7 +14,9 @@ SECTION_KEYWORDS = {
         "employee", "salary", "welfare", "power", "rent", "legal", "advertisement",
         "freight", "other expense", "consumption", "travel", "insurance", 
         "communication", "marketing", "promotion", "rates and taxes", "repair",
-        "postage", "utility", "professional fee", "audit fee", "printing"
+        "freight", "other expense", "consumption", "travel", "insurance", 
+        "communication", "marketing", "promotion", "rates and taxes", "repair",
+        "postage", "utility", "professional fee", "audit fee", "printing", "expenses"
     ],
     FinancialSection.FINANCE_COST: [
         "finance cost", "interest expense", "bank charges", "borrowing cost"

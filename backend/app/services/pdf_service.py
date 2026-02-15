@@ -22,7 +22,7 @@ if os.path.exists(r'C:\Program Files\Tesseract-OCR\tesseract.exe'):
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "temp", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 MAX_PAGES_TO_PROCESS = 10
-OCR_DPI = 150
+OCR_DPI = 300
 
 def get_file_hash(pdf_path):
     """Calculates MD5 hash of file for caching."""
@@ -63,7 +63,7 @@ def preprocess_image(image):
     try:
         image = image.convert('L') # Grayscale
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(1.5) # Light contrast boost
+        image = enhancer.enhance(2.0) # Increased contrast for sharper text
         return image
     except Exception as e:
         logger.warning(f"Image preprocessing failed: {e}")
@@ -225,7 +225,8 @@ def parse_financial_statement_advanced(lines):
         "rows": []
     }
 
-    year_pattern = re.compile(r"FY\s*(\d{2,4})", re.IGNORECASE)
+    # Enhanced year pattern to catch "March 2024", "31-03-2024", "FY25", etc.
+    year_pattern = re.compile(r"FY\s*(\d{2,4})|(\d{1,2})[-/](?:\d{1,2}|Start|End|Dec|Mar|Jun|Sep)[-/](\d{2,4})|(?:March|December|September|June)\s+(\d{4})", re.IGNORECASE)
     number_pattern = r"[-—–]?\(?\s*\d+(?:,\d+)*(?:\.\d+)?\s*\)?"
 
     year_header_found = False
