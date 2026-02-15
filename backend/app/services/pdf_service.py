@@ -300,15 +300,20 @@ def parse_financial_statement_advanced(lines):
                     
                     is_note_index = False
                     
-                    # 1. If we have more numbers than headers, and first is small integer
+                    # 1. If we have more numbers than headers, and first is small (< 100)
                     if len(result["year_headers"]) > 0 and len(numbers) > len(result["year_headers"]):
                         if first_val_float < 100:
                             is_note_index = True
                     
-                    # 2. Strong heuristic: If first number is "2" or single digit, and label implies a major section
-                    if not is_note_index and first_val_float < 100 and first_val_float.is_integer():
-                         # Ensure we don't drop if it's the ONLY value (unless we are sure it's wrong)
-                         if len(numbers) > 1: 
+                    # 2. Heuristic: If first number is small (< 100) and it's NOT a Ratio/EPS row
+                    # This handles cases like "2.1" where count check might fail or headers aren't perfect
+                    if not is_note_index and first_val_float < 100:
+                         is_safe_to_drop = True
+                         # Safety: Don't drop small numbers for EPS, Ratios, or specific fields
+                         if any(x in item_name.lower() for x in ["earnings", "share", "eps", "ratio", "parity", "yield"]):
+                             is_safe_to_drop = False
+                         
+                         if is_safe_to_drop and len(numbers) > 1: 
                              is_note_index = True
                     
                     if is_note_index:
