@@ -10,7 +10,44 @@ if os.path.exists(r'C:\Program Files\Tesseract-OCR\tesseract.exe'):
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 
+import hashlib
+import json
+
+# Simple file-based cache (in a real app, use Redis or DB)
+CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "temp", "cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+def get_file_hash(pdf_path):
+    with open(pdf_path, "rb") as f:
+        file_hash = hashlib.md5(f.read()).hexdigest()
+    return file_hash
+
+def get_cached_result(file_hash):
+    cache_path = os.path.join(CACHE_DIR, f"{file_hash}.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r") as f:
+                return json.load(f)
+        except:
+            return None
+    return None
+
+def save_to_cache(file_hash, data):
+    cache_path = os.path.join(CACHE_DIR, f"{file_hash}.json")
+    try:
+        with open(cache_path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"DEBUG: Failed to save cache: {e}")
+
 def extract_table_structure(pdf_path):
+    # 0. Check Cache
+    file_hash = get_file_hash(pdf_path)
+    cached = get_cached_result(file_hash)
+    if cached:
+        print(f"DEBUG: Cache hit for {file_hash}")
+        return cached
+
     result = {
         "year_headers": [],
         "rows": []
@@ -83,6 +120,10 @@ def extract_table_structure(pdf_path):
             print("DEBUG: Table extraction found no rows, attempting Targeted OCR...")
             # Use same relevant pages for OCR
             result = extract_table_with_ocr(pdf_path, relevant_pages)
+            
+        # Save successful result to cache
+        if result["rows"]:
+            save_to_cache(file_hash, result)
 
     except Exception as e:
         print(f"DEBUG: PDF processing error: {str(e)}")
@@ -107,9 +148,11 @@ def find_relevant_pages(pdf_path):
     
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            # Limit scan to first 100 pages to save time (Annual reports usually have financials early or middle)
+            # Limit scan to first 50 pages to save time (Annual reports usually have financials early or middle)
             # or scan all if fast enough. Text extraction is fast.
             for i, page in enumerate(pdf.pages):
+                if i > 50: break # Optimisation: Stop scanning after 50 pages. Financials are rarely at the end.
+                
                 text = page.extract_text()
                 if not text:
                     continue
@@ -121,9 +164,6 @@ def find_relevant_pages(pdf_path):
                     relevant_indices.add(i)
                     if i + 1 < len(pdf.pages): relevant_indices.add(i + 1)
                     if i + 2 < len(pdf.pages): relevant_indices.add(i + 2)
-                    
-            # Identify "consolidated" vs "standalone" if both exist? 
-            # For now, just taking all hits is better than taking all 200 pages.
             
     except Exception as e:
         print(f"DEBUG: Smart page detection failed: {e}")
@@ -131,6 +171,15 @@ def find_relevant_pages(pdf_path):
         
     return sorted(list(relevant_indices))
 
+
+def preprocess_image(image):
+    # Convert to grayscale
+    image = image.convert('L')
+    # Increase contrast
+    from PIL import ImageEnhance
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(2.0)
+    return image # Return PIL image, let Tesseract handle the rest
 
 def extract_table_with_ocr(pdf_path, pages_to_scan=None):
     result = {
@@ -152,10 +201,14 @@ def extract_table_with_ocr(pdf_path, pages_to_scan=None):
         print(f"DEBUG: Starting OCR on {len(page_iterator)} specific pages...")
 
         for page in page_iterator:
-            # Reduced DPI from 300 to 200 for speed
-            pix = page.get_pixmap(dpi=200) 
+            # Reduced DPI from 300 to 150 (Fastest)
+            pix = page.get_pixmap(dpi=150) 
             img_data = pix.tobytes("png")
             image = Image.open(io.BytesIO(img_data))
+            
+            # Preprocess image
+            image = preprocess_image(image)
+            
             custom_config = r"--oem 3 --psm 6"
             text = pytesseract.image_to_string(image, lang="eng", config=custom_config)
             if text:
