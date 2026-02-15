@@ -113,16 +113,32 @@ def extract_table_structure(pdf_path):
 
         # 2. Smart Page Detection & Text Extraction
         logger.info("Starting Text Extraction...")
-        with pdfplumber.open(pdf_path) as pdf:
-            # Check if PDF is scanned (first page has no text)
-            first_page_text = pdf.pages[0].extract_text() if pdf.pages else ""
-            is_scanned = not bool(first_page_text and first_page_text.strip())
+        
+        is_scanned = False
+        total_pages = 0
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            # Check first page text to determine if scanned (FAST)
+            text_check = ""
+            for i in range(min(1, total_pages)):
+                text_check += doc[i].get_text()
             
-            if is_scanned:
-                logger.info("Scanned PDF detected. Switching to OCR mode.")
-                # For scanned PDFs, take first 6 pages max
-                pages_to_process_indices = list(range(min(len(pdf.pages), 6)))
-            else:
+            if not text_check.strip():
+                is_scanned = True
+                logger.info("PyMuPDF detected scanned document. Switching to OCR mode.")
+            doc.close()
+        except Exception as e:
+            logger.error(f"PyMuPDF check failed: {e}")
+            # If PyMuPDF fails, we might proceed to pdfplumber or just error out, 
+            # but usually it's reliable. We'll set scanned=False to try pdfplumber.
+            is_scanned = False
+
+        if is_scanned:
+            # For scanned PDFs, take first 6 pages max
+            pages_to_process_indices = list(range(min(total_pages, 6)))
+        else:
+            with pdfplumber.open(pdf_path) as pdf:
                 # For native PDFs, find relevant pages
                 keywords = ["Balance Sheet", "Profit and Loss", "Cash Flow", "Assets", "Liabilities", "Income"]
                 for i, page in enumerate(pdf.pages):
@@ -133,7 +149,7 @@ def extract_table_structure(pdf_path):
                     # Extract text immediately for native PDFs
                     if i in pages_to_process_indices:
                         all_text_lines.extend(text.split("\n"))
-
+                
                 # Context: Add next 1 page for each hit to catch overflow tables
                 additional_indices = []
                 for idx in pages_to_process_indices:
@@ -155,7 +171,8 @@ def extract_table_structure(pdf_path):
         # 3. Parallel OCR (Only if needed)
         if is_scanned or not all_text_lines:
             logger.info(f"Running Parallel OCR on {len(pages_to_process_indices)} pages...")
-            with ThreadPoolExecutor(max_workers=2) as executor: # Render free tier has limited CPU
+            # Increased workers for speed
+            with ThreadPoolExecutor(max_workers=4) as executor: 
                 futures = [executor.submit(ocr_page, idx, pdf_path) for idx in pages_to_process_indices]
                 for future in futures:
                     text_content = future.result()
