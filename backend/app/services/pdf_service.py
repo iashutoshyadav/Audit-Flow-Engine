@@ -1,51 +1,105 @@
 import pdfplumber
-import fitz
-from PIL import Image
+import fitz  # PyMuPDF
+from PIL import Image, ImageEnhance
 import pytesseract
 import io
 import os
 import re
+import hashlib
+import json
+import time
+import logging
+from concurrent.futures import ThreadPoolExecutor
+
+# Setup Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 if os.path.exists(r'C:\Program Files\Tesseract-OCR\tesseract.exe'):
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-
-import hashlib
-import json
-
-# Simple file-based cache (in a real app, use Redis or DB)
+# Configuration
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "temp", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
+MAX_PAGES_TO_PROCESS = 10
+OCR_DPI = 150
 
 def get_file_hash(pdf_path):
-    with open(pdf_path, "rb") as f:
-        file_hash = hashlib.md5(f.read()).hexdigest()
-    return file_hash
+    """Calculates MD5 hash of file for caching."""
+    hash_md5 = hashlib.md5()
+    try:
+        with open(pdf_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+    except Exception as e:
+        logger.error(f"Hashing error: {e}")
+        return None
+    return hash_md5.hexdigest()
 
 def get_cached_result(file_hash):
+    if not file_hash: return None
     cache_path = os.path.join(CACHE_DIR, f"{file_hash}.json")
     if os.path.exists(cache_path):
         try:
             with open(cache_path, "r") as f:
+                logger.info(f"Cache hit: {file_hash}")
                 return json.load(f)
-        except:
-            return None
+        except Exception as e:
+            logger.error(f"Cache read error: {e}")
     return None
 
 def save_to_cache(file_hash, data):
+    if not file_hash: return
     cache_path = os.path.join(CACHE_DIR, f"{file_hash}.json")
     try:
         with open(cache_path, "w") as f:
             json.dump(data, f)
+            logger.info(f"Saved to cache: {file_hash}")
     except Exception as e:
-        print(f"DEBUG: Failed to save cache: {e}")
+        logger.error(f"Cache save error: {e}")
+
+def preprocess_image(image):
+    """Optimizes image for OCR: Grayscale + Contrast."""
+    try:
+        image = image.convert('L') # Grayscale
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(1.5) # Light contrast boost
+        return image
+    except Exception as e:
+        logger.warning(f"Image preprocessing failed: {e}")
+        return image
+
+def ocr_page(page_index, pdf_path):
+    """Worker function for parallel OCR."""
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc[page_index]
+        pix = page.get_pixmap(dpi=OCR_DPI)
+        img_data = pix.tobytes("png")
+        image = Image.open(io.BytesIO(img_data))
+        image = preprocess_image(image)
+        
+        custom_config = r"--oem 3 --psm 6"
+        text = pytesseract.image_to_string(image, lang="eng", config=custom_config)
+        doc.close()
+        return text
+    except Exception as e:
+        logger.error(f"OCR error on page {page_index}: {e}")
+        return ""
 
 def extract_table_structure(pdf_path):
-    # 0. Check Cache
+    start_time = time.time()
+    
+    # Check File Size Limit (10MB)
+    file_size = os.path.getsize(pdf_path)
+    if file_size > 10 * 1024 * 1024:
+        logger.error(f"File too large: {file_size / (1024*1024):.2f}MB")
+        return {"rows": [], "error": "File exceeds 10MB limit"}
+
+    # 1. Caching
     file_hash = get_file_hash(pdf_path)
     cached = get_cached_result(file_hash)
     if cached:
-        print(f"DEBUG: Cache hit for {file_hash}")
         return cached
 
     result = {
@@ -54,174 +108,98 @@ def extract_table_structure(pdf_path):
     }
 
     try:
-        # 1. Smart Page Detection
-        relevant_pages = find_relevant_pages(pdf_path)
-        print(f"DEBUG: Relevant pages found: {relevant_pages}")
+        all_text_lines = []
+        pages_to_process_indices = []
 
+        # 2. Smart Page Detection & Text Extraction
+        logger.info("Starting Text Extraction...")
         with pdfplumber.open(pdf_path) as pdf:
-            all_text_lines = []
+            # Check if PDF is scanned (first page has no text)
+            first_page_text = pdf.pages[0].extract_text() if pdf.pages else ""
+            is_scanned = not bool(first_page_text and first_page_text.strip())
             
-            # Process only relevant pages
-            pages_to_process = [pdf.pages[i] for i in relevant_pages] if relevant_pages else pdf.pages
-            
-            if not relevant_pages:
-                 print("DEBUG: No specific financial pages found, scanning first 20 pages...")
-                 pages_to_process = pdf.pages[:20]
+            if is_scanned:
+                logger.info("Scanned PDF detected. Switching to OCR mode.")
+                # For scanned PDFs, take first 6 pages max
+                pages_to_process_indices = list(range(min(len(pdf.pages), 6)))
+            else:
+                # For native PDFs, find relevant pages
+                keywords = ["Balance Sheet", "Profit and Loss", "Cash Flow", "Assets", "Liabilities", "Income"]
+                for i, page in enumerate(pdf.pages):
+                    text = page.extract_text() or ""
+                    if any(k.lower() in text.lower() for k in keywords):
+                        pages_to_process_indices.append(i)
+                    
+                    # Extract text immediately for native PDFs
+                    if i in pages_to_process_indices:
+                        all_text_lines.extend(text.split("\n"))
 
-            for page in pages_to_process:
-                text = page.extract_text()
-                if text:
-                    all_text_lines.extend(text.split("\n"))
+                # Context: Add next 1 page for each hit to catch overflow tables
+                additional_indices = []
+                for idx in pages_to_process_indices:
+                    if idx + 1 < len(pdf.pages) and (idx + 1) not in pages_to_process_indices:
+                         additional_indices.append(idx + 1)
+                
+                # Fetch text for context pages
+                for idx in additional_indices:
+                     # Only if we aren't over limit
+                     if len(pages_to_process_indices) + len(additional_indices) <= MAX_PAGES_TO_PROCESS:
+                         try:
+                             text = pdf.pages[idx].extract_text()
+                             if text: all_text_lines.extend(text.split("\n"))
+                         except: pass
 
-            if all_text_lines:
-                print(f"DEBUG: Attempting advanced parse on {len(all_text_lines)} text lines")
-                result = parse_financial_statement_advanced(all_text_lines)
+        # deduplicate and limit indices
+        pages_to_process_indices = sorted(list(set(pages_to_process_indices)))[:MAX_PAGES_TO_PROCESS]
+        
+        # 3. Parallel OCR (Only if needed)
+        if is_scanned or not all_text_lines:
+            logger.info(f"Running Parallel OCR on {len(pages_to_process_indices)} pages...")
+            with ThreadPoolExecutor(max_workers=2) as executor: # Render free tier has limited CPU
+                futures = [executor.submit(ocr_page, idx, pdf_path) for idx in pages_to_process_indices]
+                for future in futures:
+                    text_content = future.result()
+                    if text_content:
+                        all_text_lines.extend(text_content.split("\n"))
 
-            # 2. Targeted Table Extraction (if parse failed)
-            if not result["rows"]:
-                print("DEBUG: Advanced parse found no rows, attempting targeted table extraction...")
-                for page in pages_to_process:
-                    tables = page.extract_tables()
-                    if not tables:
-                        continue
+        # 4. Parse Results
+        logger.info(f"Parsing {len(all_text_lines)} lines...")
+        result = parse_financial_statement_advanced(all_text_lines)
+        
+        # 5. Fallback Table Extraction (Native only)
+        if not result["rows"] and not is_scanned:
+             logger.info("Parsing failed, trying native table extraction...")
+             with pdfplumber.open(pdf_path) as pdf:
+                 for i in pages_to_process_indices:
+                     page = pdf.pages[i]
+                     tables = page.extract_tables()
+                     for table in tables:
+                         if not table: continue
+                         # ... (reuse table parsing logic if needed, simplified here)
+                         # Simple converter for table to rows for consistency
+                         for row in table:
+                             if row and len(row) > 1 and row[0]: # Basic validation
+                                 result["rows"].append({
+                                     "item": str(row[0]).strip(),
+                                     "values": [str(c).strip() for c in row[1:] if c],
+                                     "indent": 0
+                                 })
 
-                    for table in tables:
-                        if not table:
-                            continue
-
-                        if not result["year_headers"] and len(table) > 0:
-                            header_row = table[0]
-                            for cell in header_row[1:]:
-                                if cell:
-                                    result["year_headers"].append(str(cell).strip())
-
-                        for row in table[1:]:
-                            if not row or not row[0]:
-                                continue
-
-                            item_name = str(row[0]).strip()
-                            if not item_name:
-                                continue
-
-                            indent_level = len(item_name) - len(item_name.lstrip())
-
-                            values = []
-                            for cell in row[1:]:
-                                values.append(str(cell).strip() if cell else "")
-
-                            result["rows"].append({
-                                "item": item_name.strip(),
-                                "values": values,
-                                "indent": indent_level // 2
-                            })
-
-        # 3. Targeted OCR (last resort)
-        if not result["rows"]:
-            print("DEBUG: Table extraction found no rows, attempting Targeted OCR...")
-            # Use same relevant pages for OCR
-            result = extract_table_with_ocr(pdf_path, relevant_pages)
-            
-        # Save successful result to cache
+        # Save to cache if successful
         if result["rows"]:
             save_to_cache(file_hash, result)
+            
+        logger.info(f"Extraction completed in {time.time() - start_time:.2f}s")
 
     except Exception as e:
-        print(f"DEBUG: PDF processing error: {str(e)}")
+        logger.error(f"Extraction failed: {e}")
         import traceback
         traceback.print_exc()
 
     return result
 
+# ... (Keep existing parse_financial_statement_advanced and helper functions below)
 
-def find_relevant_pages(pdf_path):
-    """
-    Scans PDF text quickly to find pages containing financial statements.
-    Returns a list of page indices (0-based) to process.
-    """
-    keywords = [
-        "Balance Sheet", "Statement of Assets and Liabilities",
-        "Statement of Profit and Loss", "Income Statement", 
-        "Cash Flow Statement", "Statement of Cash Flows"
-    ]
-    
-    relevant_indices = set()
-    
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            # Limit scan to first 50 pages to save time (Annual reports usually have financials early or middle)
-            # or scan all if fast enough. Text extraction is fast.
-            for i, page in enumerate(pdf.pages):
-                if i > 50: break # Optimisation: Stop scanning after 50 pages. Financials are rarely at the end.
-                
-                text = page.extract_text()
-                if not text:
-                    continue
-                
-                text_lower = text.lower()
-                # Check for keywords
-                if any(k.lower() in text_lower for k in keywords):
-                    # Found a hit! Add this page and next 2 pages context
-                    relevant_indices.add(i)
-                    if i + 1 < len(pdf.pages): relevant_indices.add(i + 1)
-                    if i + 2 < len(pdf.pages): relevant_indices.add(i + 2)
-            
-    except Exception as e:
-        print(f"DEBUG: Smart page detection failed: {e}")
-        return []
-        
-    return sorted(list(relevant_indices))
-
-
-def preprocess_image(image):
-    # Convert to grayscale
-    image = image.convert('L')
-    # Increase contrast
-    from PIL import ImageEnhance
-    enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(2.0)
-    return image # Return PIL image, let Tesseract handle the rest
-
-def extract_table_with_ocr(pdf_path, pages_to_scan=None):
-    result = {
-        "year_headers": [],
-        "rows": []
-    }
-
-    try:
-        doc = fitz.open(pdf_path)
-        all_text_lines = []
-        
-        # Determine pages to scan
-        if pages_to_scan:
-            page_iterator = [doc[i] for i in pages_to_scan if i < len(doc)]
-        else:
-            # Fallback: Scan first 20 pages if no guidance
-            page_iterator = list(doc)[:20]
-
-        print(f"DEBUG: Starting OCR on {len(page_iterator)} specific pages...")
-
-        for page in page_iterator:
-            # Reduced DPI from 300 to 150 (Fastest)
-            pix = page.get_pixmap(dpi=150) 
-            img_data = pix.tobytes("png")
-            image = Image.open(io.BytesIO(img_data))
-            
-            # Preprocess image
-            image = preprocess_image(image)
-            
-            custom_config = r"--oem 3 --psm 6"
-            text = pytesseract.image_to_string(image, lang="eng", config=custom_config)
-            if text:
-                all_text_lines.extend(text.split("\n"))
-
-        doc.close()
-        print(f"DEBUG: OCR completed, found {len(all_text_lines)} lines")
-        result = parse_financial_statement_advanced(all_text_lines)
-
-    except Exception as e:
-        print(f"DEBUG: OCR error: {str(e)}")
-
-    return result
 
 
 def parse_financial_statement_advanced(lines):

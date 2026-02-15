@@ -25,6 +25,10 @@ async def extract_financials(file: UploadFile = File(...)):
             
             table_data = extract_table_structure(pdf_path)
             
+            if table_data.get("error"):
+                 yield json.dumps({"status": "error", "message": table_data["error"]}) + "\n"
+                 return
+            
             yield json.dumps({"progress": 35, "message": "Text extraction complete..."}) + "\n"
             
             yield json.dumps({"progress": 40, "message": "Analyzing financial statements..."}) + "\n"
