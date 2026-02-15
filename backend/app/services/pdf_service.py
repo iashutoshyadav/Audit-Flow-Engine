@@ -250,10 +250,21 @@ def parse_financial_statement_advanced(lines):
             
             years_found = year_pattern.findall(line)
             if years_found:
-                result["year_headers"] = [f"FY {y}" for y in years_found]
-                year_header_found = True
-                i += 1
-                continue
+                # Correctly handle regex groups (findall returns tuples)
+                flat_years = []
+                for y_match in years_found:
+                    if isinstance(y_match, tuple):
+                        # Find the first non-empty group in the tuple
+                        yr = next((item for item in y_match if item), "")
+                        if yr: flat_years.append(yr)
+                    else:
+                        flat_years.append(y_match)
+                
+                if flat_years:
+                     result["year_headers"] = [f"FY {y}" for y in flat_years]
+                     year_header_found = True
+                     i += 1
+                     continue
 
         numbers = re.findall(number_pattern, line)
 
@@ -267,7 +278,7 @@ def parse_financial_statement_advanced(lines):
                 .replace("-", "")
                 .replace("—", "")
                 .replace("–", "")
-            ) > 1
+            ) > 0 # Changed from > 1 to allow single digits if they are valid values, handled later
         ]
 
         if numbers or is_category_header(line):
@@ -281,8 +292,27 @@ def parse_financial_statement_advanced(lines):
                     else:
                         first_num_pos = len(line)
                 else:
+                    # Logic to identify if the first number is a Note Index
                     first_val_clean = numbers[0].replace(',', '').replace('(', '').replace(')', '').strip()
-                    if len(first_val_clean) <= 2 and len(numbers) > 1:
+                    first_val_float = 0.0
+                    try: first_val_float = float(first_val_clean)
+                    except: pass
+                    
+                    is_note_index = False
+                    
+                    # 1. If we have more numbers than headers, and first is small integer
+                    if len(result["year_headers"]) > 0 and len(numbers) > len(result["year_headers"]):
+                        if first_val_float < 100:
+                            is_note_index = True
+                    
+                    # 2. Strong heuristic: If first number is "2" or single digit, and label implies a major section
+                    if not is_note_index and first_val_float < 100 and first_val_float.is_integer():
+                         # Ensure we don't drop if it's the ONLY value (unless we are sure it's wrong)
+                         if len(numbers) > 1: 
+                             is_note_index = True
+                    
+                    if is_note_index:
+                         print(f"DEBUG: Dropping note index: '{numbers[0]}'")
                          first_num_pos = line.find(numbers[1])
                          numbers = numbers[1:]
                     else:
