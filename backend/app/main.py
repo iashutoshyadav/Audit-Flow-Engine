@@ -8,10 +8,11 @@ app = FastAPI(title="Financial Extractor API")
 frontend_url = os.getenv("FRONTEND_URL")
 
 origins = [
-    frontend_url,
     "http://localhost:5173",
     "http://localhost:3000",
 ]
+if frontend_url:
+    origins.append(frontend_url)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,5 +25,9 @@ app.add_middleware(
 @app.get("/")
 async def health_check():
     return {"status": "ok", "message": "API is online"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
 
 app.include_router(router, prefix="/api")
