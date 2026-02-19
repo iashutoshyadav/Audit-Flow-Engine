@@ -28,5 +28,5 @@ class FinancialLineItem(BaseModel):
 
 class FinancialStatement(BaseModel):
     year_headers: List[str]
-    structured_data: Dict[FinancialSection, List[FinancialLineItem]]
+    structured_data: Dict[str, List[FinancialLineItem]]
     raw_rows: List[Dict]
