@@ -47,8 +47,8 @@ if POPPLER_PATH:
 CACHE_DIR = os.getenv("CACHE_DIR", "C:/tmp/pdf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-OCR_DPI = 400
-MAX_PAGES = 10
+OCR_DPI = 250
+MAX_PAGES = 8
 
 _MONTH_RE = re.compile(
     r'^(?:January|February|March|April|May|June|July|August|September|'
